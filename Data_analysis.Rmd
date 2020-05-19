@@ -1,0 +1,243 @@
+---
+title: "Climatic variables influence the temporal dynamics of an anuran metacommunity in a non-stationary way"
+author: "Karoline Ceron, Diogo B. Provete, Diego J. Santana, Elaine M. Lucas and Jairo José Zocche"
+date: "30/01/2019"
+output: html_document
+---
+
+##Loading packages
+
+```{r message=FALSE, warning=FALSE}
+library(GGally)
+library(usdm)
+library(adespatial)
+library(ade4)
+library(adegraphics)
+library(vegan)
+library(tidyverse)
+library(codyn)
+```
+
+##Importing and manipulating data sets
+
+###Exploratory data analysis
+
+To make the plot of temporal variation in species abundance and richness, and climatic variables
+
+```{r}
+data<-read.table("date1.txt", header = T) 
+head(data);str(data)
+data$date <- as.Date(data$date, "%d/%m/%Y")
+
+df <- data %>%
+       select(date, richness, abundance) %>%
+       gather(key = "variable", value = "value", -date)
+head(df)
+
+df_var <- data %>%
+       select(date, temp_C, hum, rain_cm, photo_min) %>%
+       gather(key = "variable", value = "value", -date)
+```
+
+Let's see how species abundance and richness vary throughout the year:
+
+```{r}
+qplot(date, value, data = df, geom = "line", group = variable, col=variable) +
+       facet_grid(variable ~ ., scale = "free_y") +
+       scale_x_date(date_labels = "%b-%y", date_breaks = "1 month")+
+       theme_bw()+
+       theme(legend.position = "none")
+```
+
+Now the same for climatic variables. Relative humidity is measured in percentage (%), photoperiod in minutes, rainfall in cm, and temperature in ºC.
+
+```{r}
+
+qplot(date, value, data = df_var, geom = "line", group = variable, col=variable) +
+       facet_grid(variable ~ ., scale = "free_y") +
+       scale_x_date(date_labels = "%b-%y", date_breaks = "1 month")+
+       theme_bw()+
+       theme(legend.position = "none")
+```
+
+```{r}
+ggpairs(data[,4:7])
+
+vifstep(data[,4:7])
+```
+
+The first plot shows the correlation pattern among predictor variables, and the second code line shows that there's no multicolinearity problem in the dataset.
+
+Now, let's import the data set with species composition to make further analysis shown in the main manuscript.
+
+```{r}
+spi <- read.table("spatio.txt", h=TRUE)
+head(spi)
+
+spi_g <- spi %>% 
+  gather(key="Species",value="count", Aer:Vur)
+head(spi_g)
+
+aggdat <- aggregate(count ~ Species * Site * month, 
+                    data = spi_g, 
+                    FUN = mean)
+head(aggdat)
+```
+
+#Temporal stability
+
+Let's begin by visualizing **species turnover** throughout the year in each sampling site: North area and South area
+
+See Table S1 for species name abbreviations
+
+```{r}
+ggplot(aggdat, aes(month, count, color = Species)) + 
+  geom_line(size = 2) + coord_polar() + theme_bw() + facet_wrap(~Site) +
+  theme(legend.position = "bottom")
+```
+
+Let's verify how happens the disappearance of species throughout the year
+
+
+```{r}
+KNZ_disappearance <- turnover(df = aggdat,
+                              time.var = "month",
+                              species.var = "Species",
+                              abundance.var = "count",
+                              replicate.var = "Site",
+                              metric = "disappearance")
+
+KNZ_disappearance
+
+ggplot(KNZ_disappearance, aes(month, disappearance))+
+  geom_line(aes(col=Site))+
+  facet_wrap(.~Site)+
+  theme_classic()+theme(legend.position = "none")
+```
+
+
+Now let's test for community temporal **stability** following Tilman's (1999) method that is a ratio betwee the temporal mean of species abundance divided by the temporal standard deviation. This is avery simple, yet powerful way to understand how the species abundances fluctuate during the study period and can serve to formulate new hypothesis, to be later complemented by analysis.
+
+```{r}
+KNZ_stability <- community_stability(aggdat, 
+                                     time.var = "month", 
+                                     abundance.var = "count", 
+                                     replicate.var = "Site")
+KNZ_stability
+```
+
+We also calculate **syncrony** by comparing the average correlation of each individual species with the rest of the community (Gross et al. 2014 Am Nat) to obtain a metric for each sampling site. It varies from -1 (perfect asynchrony) to 1 (perfect synchrony) and is centered at 0 when species fluctuate independently. It not sensitive to richness.
+This is a metric usually used to test how species respond to environmental variability. It can inform about community stability because if species respond to environmental variation in the same way (in terms of their abundance), it would indicate that the community is less stable. Otherwise, communities would be buffered against extreme environmental variation (e.g., unusual heat wave) by having species which respond differently to environmental variation. 
+
+```{r}
+KNZ_synchrony_Gross<- synchrony(df = aggdat, 
+                                time.var = "month", 
+                                species.var = "Species", 
+                                abundance.var = "count",
+                                metric = "Gross",
+                                replicate.var = "Site")
+
+KNZ_synchrony_Gross
+```
+
+
+#STATICO analysis
+
+This analysis find the common structure of two sets of paired tables: one for species composition (species by site) and another set for environmental variables (sites by climate variables). These two sets of data were collected monthly for one year in the same places.
+
+Let's begin by importing the data sets. To run the analysis we need a _design_ matriz that will inform how the sampling units (months) are arranged in seasons, and then we need the matrix with the climatic variables, collected in the same sites of the species.
+
+```{r}
+design <- read.table("design.txt", h=TRUE)
+head(design)
+
+spe <- read.table("spatio.txt", h=TRUE)
+head(spe)
+spe <- spe[,-c(1,2)]
+
+env <- read.table("env1.txt", h=TRUE) 
+head(env)
+env <- env[,-c(1,2)]
+head(env)
+```
+
+First, we standardize environmental variables to zero mean and unit variance, since they were measures in different scales. We're using the four seasons instead of each month from now on. 
+
+We transform species abundance using the Hellinger distance in order to downweight the huge difference in abundance among species in different sites and months. 
+
+```{r}
+spe_std <- decostand(spe, "hell", MARGIN = 2)
+```
+
+Now we can begin the three-step procedure that is part of STATICO. We first run a Correspondence Analysis on transformed species composition matrix:
+
+```{r}
+speca <- dudi.coa(spe_std, nf = 2, scan = FALSE)
+```
+
+Then, we enter the result of the CA in a within-class analysis (a kind of PCA):
+
+```{r}
+wit22 <- wca(speca, design$season, scan = FALSE, nf = 2)
+```
+
+Now, we must transform our object returned by the previous function into a k-table, i.e., a series of tables that will be further analyzed together:
+
+```{r}
+kta22 <- ktab.within(wit22)
+spl0 <- split(env, design$season)
+spl1 <- split(kta22$cw, design$season)
+```
+
+And finally, we prepare the data to run the Partial Triadic Analysis, which sums up the information from the two previous multivariate analysis:
+
+```{r}
+spl2 <- lapply(1:4, function(k) scalewt(spl0[[k]], wt = spl1[[k]], scale = FALSE))
+w <- NULL
+for (k in 1:4) w <- rbind.data.frame(w, spl2[[k]])
+p1 <- apply(w, 2, function(x) sqrt(sum(x*x*kta22$cw)/4))
+w <- sweep(w, 2, p1, "/")
+apply(w, 2, function(x) sum(x*x*kta22$cw))
+w <- as.data.frame(t(w))
+kta12 <- ktab.data.frame(w, rep(6, 4), tabnames=tab.names(kta22), w.row=rep(1, 4), w.col = kta22$cw)
+ktacroi <- ktab.match2ktabs(kta12, kta22)
+statico12 <- pta(ktacroi, scan = FALSE)
+```
+
+###Interstructure and compromise factor maps
+
+The previous procedure produces three types of plots with the results.
+These ordination diagrams show the stable part of the anurans-climatic variables relationships: A) Importance of each season to the compromise; B) Climatic variables projected on the first factorial plan, in which: Photo = photoperiod, Rain = rainfall, Hum = humidity, Temp=temperature; C) Hellinger-transformed abundances of anuran species projected on the same factorial plan (See Table S1 for species name abbreviation); D) Typological value of the four tables of seasons and their influence in building the Compromise (y-axis is the square cosines and x-axis the table weights). 
+
+```{r}
+plot(statico12, plabels.boxes.draw = FALSE)
+kplot(statico12, plabels.boxes.draw = FALSE)
+```
+
+Interstructure plot of STATICO for climatic variables (red) and anurans (blue), where: photo = photoperiod, rain = rainfall, hum = humidity, temp=temperature. Arrow length represents the strength of the relationship.
+
+```{r}
+slE <- s.label(statico12$Tli, facets = statico12$TL[, 1], labels = statico12$TL[, 2], psub.cex = 2, plabel=list(col = "red", cex=1.5, optim=TRUE), plot=FALSE)
+saE <- s.arrow(statico12$Tli, facets = statico12$TL[, 1], psub.cex = 0, plabels.cex=0, plines.lwd=0.5, plot=FALSE)
+sE <- superpose(slE, saE)
+slH <- s.label(statico12$Tco, facets = statico12$TC[, 1], labels = statico12$TC[, 2], psub.cex = 2, plabel=list(col = "blue", cex=1.5, optim=TRUE), plot=FALSE)
+saH <- s.arrow(statico12$Tco, facets = statico12$TC[, 1], psub.cex = 0, plabel.cex=0, plines.lwd=0.5, plot=FALSE)
+sH <- superpose(slH, saH)
+sE1 <- sE[1:4]
+sH1 <- sH[1:4]
+sE1@positions <- layout2position(c(6,1))
+sH1@positions <- layout2position(c(6,1))
+sEH1 <- ADEgS(list(sE1, sH1), layout=c(1,2))
+```
+
+Trajectory plot of STATICO for sampling sites of the climatic variables (red) and anurans species (blue). Numbers indicate sampling sites grouped by season. Notice the direction of arrows in the pairs of figures pointing to different directions in different seasons, suggesting that species respond differently to climate depending on the season.
+
+```{r}
+st1 <- s.traject(statico12$supIX, facets=statico12$supTI[,1], plabels.cex=0, plot=FALSE, psub.cex=0, plines.lwd=0.5)
+sla1 <- s.label(statico12$supIX, facets=statico12$supTI[,1], plot=FALSE, psub.cex=.8, labels=statico12$supTI[,2], plabels=list(cex=.8, col="red", optim=TRUE))
+s1 <- superpose(st1, sla1)
+st2 <- s.traject(statico12$supIY, facets=statico12$supTI[,1], plabels.cex=0, plot=FALSE, psub.cex=0, plines.lwd=0.5)
+sla2 <- s.label(statico12$supIY, facets=statico12$supTI[,1], plot=FALSE, psub.cex=.8, labels=statico12$supTI[,2], plabels=list(cex=0.8, col="blue", optim=TRUE))
+s2 <- superpose(st2, sla2)
+ADEgS(list(s1,s2), layout = c(2,1))
+```
